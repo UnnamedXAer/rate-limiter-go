@@ -53,86 +53,7 @@ func NewLimiter(permitsPerMinute PermitsLimit, timeUnit ...time.Duration) *Limit
 }
 
 func (l *Limiter) Wait(ctx context.Context) error {
-
-	if time.Now().Nanosecond() > 0 {
-		return l.WaitMany(ctx, 1)
-	}
-
-	bIdx, i := getBIdxAndIdx(ctx)
-
-	if l.permits == float64(Unlimited) {
-		l.log.Printf("[%2d][%2d] permit granted - unlimited permits", bIdx, i)
-		return nil
-	}
-
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("[%2d][%2d] ctx Done while waiting for permits' lock, %w", bIdx, i, ctx.Err())
-	default:
-		//
-	}
-
-	l.lock <- struct{}{}
-	defer func() {
-		<-l.lock
-	}()
-
-	prevAvailablePermits := l.oldPermits
-	now := time.Now()
-	wouldProducePermits := l.catchUp(now)
-	l.oldPermits = min(prevAvailablePermits+wouldProducePermits, float64(l.permits))
-
-	// d := l.timeUnitFractionToCreatePermit
-
-	// l.log.Printf("[%2d][%2d] last permit acquired %s ago | prev permits %.3f | would produce %.3f permits | now %.3f permits available",
-	// 	bIdx,
-	// 	i,
-	// 	timeDiff,
-	// 	prevAvailablePermits,
-	// 	wouldProducePermits,
-	// 	l.availablePermits,
-	// )
-
-	if l.oldPermits >= 1 {
-		l.oldPermits--
-		l.lastAt = now
-		l.log.Printf("[%2d][%2d] permit granted, %.3f permits were available", bIdx, i, l.oldPermits+1)
-		return nil
-	}
-
-	// issue: if we acquire all of the permits in "burst" (in a single moment),
-	// then we must wait the "limit time" to be able to produce a new one.
-	// In that situation we cannot produce a new one by just waiting "time for single permit".
-	// If we do that we would be able to produce nearly (2 * l.permits) in a our unit of time (limiterTime).
-	//
-	// So we meet to wait until that unit ends to produce one permit, and then a new one for every
-	// "time for single permit" passed.
-	//
-	// if available permits is zero, we should calculate if some permits could already be produces
-	// based on passed time;
-	//
-
-	missingPermitFraction := 1 - l.oldPermits
-	waitTime := l.timeUnitFractionToCreatePermit * missingPermitFraction
-	waitDuration := time.Duration(waitTime)
-	next := time.After(waitDuration)
-
-	l.log.Printf("[%2d][%2d] not enough permits available (we are missing ~%.3f of permit), need to wait %s", bIdx, i, missingPermitFraction, waitDuration)
-
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("[%2d][%2d] ctx Done while waiting for the permit, %w", bIdx, i, ctx.Err())
-	case <-next:
-		l.lastAt = time.Now()
-		// we waited a time that corresponds to the fraction of the permit that was missing,
-		// e.g. we had 0.3 of te permit due to the different from `l.lastAt` to `now()`, so we need to wait
-		// the time for the rest of the permit, i.e. `~(0.7*timeForSinglePermit)`
-		// after that we have full permit, but we instantly use that so the available permits
-		// is zero after this operation;
-		l.oldPermits = 0
-		l.log.Printf("[%2d][%2d] permit awaited (%s)", bIdx, i, waitDuration)
-		return nil
-	}
+	return l.WaitMany(ctx, 1)
 }
 
 func getBIdxAndIdx(ctx context.Context) (int, int) {
@@ -211,11 +132,13 @@ func (l *Limiter) AllowNow(n int64) bool {
 }
 
 func (l *Limiter) Allow(n int64, at time.Time) bool {
-	if n > int64(l.permits) {
-		return false
-	}
+	// if n > int64(l.permits) {
+	// 	return false
+	// }
 
-	return l.Available(at) >= n
+	available := l.Available(at)
+
+	return available >= n
 }
 
 func (l *Limiter) AvailableNow() int64 {
@@ -229,6 +152,9 @@ func (l *Limiter) Available(at time.Time) int64 {
 }
 
 func (l *Limiter) available(at time.Time) float64 {
+
+	// TODO: do we correctly handle case when `at - now > timeUnit`
+
 	possiblePermits := l.catchUp(at)
 	return possiblePermits + l.oldPermits
 }

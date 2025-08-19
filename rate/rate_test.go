@@ -23,14 +23,19 @@ func TestAllowNow(t *testing.T) {
 	got := limiter.AllowNow(expectedAtLeast)
 
 	if !got {
-		t.Errorf("with limiter of 50 permits per 1 second expect to have at least %d permits after 333 ms", expectedAtLeast)
+		t.Errorf(
+			"with limiter of 50 permits per 1 second expect to have at least %d permits after 333 ms",
+			expectedAtLeast)
 	}
 
 	expectedNotAvailable := int64(permitsLimit / 2)
 	got2 := limiter.AllowNow(expectedNotAvailable)
 
 	if got2 {
-		t.Errorf("with limiter of 50 permits per 1 second expect to have %d permits after 333 ms, but at least %d were available", expectedAtLeast, expectedNotAvailable)
+		t.Errorf(
+			"with limiter of 50 permits per 1 second expect to have %d permits after 333 ms, but at least %d were available",
+			expectedAtLeast,
+			expectedNotAvailable)
 	}
 }
 
@@ -61,11 +66,19 @@ func TestAllowNowWithSomePermitsUsed(t *testing.T) {
 	got2 := limiter.AllowNow(producedPermits)
 
 	if !got {
-		t.Errorf("with limiter of 50 permits per 1 second expect to have produce %d permits after 333 ms, with %d waisted, %d should be available but were not", producedPermits, waistPermits, expectedAvailable)
+		t.Errorf(
+			"with limiter of 50 permits per 1 second expect to have produce %d permits after 333 ms, with %d waisted, %d should be available but were not",
+			producedPermits,
+			waistPermits,
+			expectedAvailable)
 	}
 
 	if got2 {
-		t.Errorf("with limiter of 50 permits per 1 second expect to have produce %d permits after 333 ms, but %d were waisted, so %d should not be available but were available", producedPermits, waistPermits, expectedNotAvailable)
+		t.Errorf(
+			"with limiter of 50 permits per 1 second expect to have produce %d permits after 333 ms, but %d were waisted, so %d should not be available but were available",
+			producedPermits,
+			waistPermits,
+			expectedNotAvailable)
 	}
 }
 
@@ -84,19 +97,26 @@ func TestAllow(t *testing.T) {
 	timeAt := time.Now().Add(time.Second)
 	expectedAvailable := int64(permitsLimit + permitsLimit*timeLimitFraction)
 
-	// TODO: rethink Allow, should it report true for timeAt that is later than now+timeUnit and number of needed permits exceed permits limit?
+	// TODO: rethink Allow, should it report true for timeAt that is later than now+timeUnit
+	// and number of needed permits exceed permits limit?
 	// the caller would have to consume permits in realtime to prevent their expiration;
 	got := limiter.Allow(expectedAvailable, timeAt)
 
 	if !got {
-		t.Errorf("with limiter of 50 permits per 1 second expect to have ~%d permits after at %s, but didn't", expectedAvailable, timeAt)
+		t.Errorf("with limiter of 50 permits per 1 second expect to have ~%d permits after at %s, but didn't",
+			expectedAvailable,
+			timeAt)
 	}
 
 	expectedNotAvailable := int64(expectedAvailable) + 5
 	got2 := limiter.Allow(expectedNotAvailable, timeAt)
 
 	if got2 {
-		t.Errorf("with limiter of 50 permits per 1 second expect to have no more than ~%d permits after at %s, but got at least %d", expectedAvailable, timeAt, expectedNotAvailable)
+		t.Errorf(
+			"with limiter of 50 permits per 1 second expect to have no more than ~%d permits after at %s, but got at least %d",
+			expectedAvailable,
+			timeAt,
+			expectedNotAvailable)
 	}
 }
 
@@ -119,14 +139,21 @@ func TestAllowTimeBeforeLastAcquire(t *testing.T) {
 	got := limiter.Allow(expectedAvailable, timeAt)
 
 	if !got {
-		t.Errorf("with limiter of 50 permits per 1 second expect to have ~%d permits after at %s, but didn't", expectedAvailable, timeAt)
+		t.Errorf(
+			"with limiter of 50 permits per 1 second expect to have ~%d permits after at %s, but didn't",
+			expectedAvailable,
+			timeAt)
 	}
 
 	expectedNotAvailable := int64(expectedAvailable) + 2
 	got2 := limiter.Allow(expectedNotAvailable, timeAt)
 
 	if got2 {
-		t.Errorf("with limiter of 50 permits per 1 second expect to have no more than ~%d permits after at %s, but got at least %d", expectedAvailable, timeAt, expectedNotAvailable)
+		t.Errorf(
+			"with limiter of 50 permits per 1 second expect to have no more than ~%d permits after at %s, but got at least %d",
+			expectedAvailable,
+			timeAt,
+			expectedNotAvailable)
 	}
 }
 
@@ -158,11 +185,19 @@ func TestAllowWithSomePermitsUsed(t *testing.T) {
 	got2 := limiter.Allow(producedPermits, timeAt)
 
 	if !got {
-		t.Errorf("with limiter of 50 permits per 1 second expect to have produce %d permits after 1s 333 ms, with %d waisted, %d should be available but were not", producedPermits, waistPermits, expectedAvailable)
+		t.Errorf(
+			"with limiter of 50 permits per 1 second expect to have produce %d permits after 1s 333 ms, with %d waisted, %d should be available but were not",
+			producedPermits,
+			waistPermits,
+			expectedAvailable)
 	}
 
 	if got2 {
-		t.Errorf("with limiter of 50 permits per 1 second expect to have produce %d permits after 1s 333 ms, but %d were waisted, so %d should not be available but were available", producedPermits, waistPermits, expectedNotAvailable)
+		t.Errorf(
+			"with limiter of 50 permits per 1 second expect to have produce %d permits after 1s 333 ms, but %d were waisted, so %d should not be available but were available",
+			producedPermits,
+			waistPermits,
+			expectedNotAvailable)
 	}
 }
 
@@ -180,7 +215,10 @@ func TestAvailableDoNotAccumulateOverLimit(t *testing.T) {
 	got := limiter.Allow(expectedAvailable, timeAt)
 
 	if !got {
-		t.Errorf("with limiter of 50 permits per 1 second expect to have %d permits after at %s, but didn't", expectedAvailable, timeAt)
+		t.Errorf(
+			"with limiter of 50 permits per 1 second expect to have %d permits after at %s, but didn't",
+			expectedAvailable,
+			timeAt)
 	}
 
 	expectedNotAvailable := int64(expectedAvailable) + 1
@@ -287,11 +325,15 @@ func TestLimiterCtxCanceled(t *testing.T) {
 	cancel()
 
 	if processedCnt != 0 {
-		t.Errorf("all jobs should be cancel due to their context was cancelled before, processed jobs: got=%d", processedCnt)
+		t.Errorf(
+			"all jobs should be cancel due to their context was cancelled before, processed jobs: got=%d",
+			processedCnt)
 	}
 
 	if cancelledCnt != 10 {
-		t.Errorf("all jobs should be cancel due to their context was cancelled before, cancelled jobs: got=%d", cancelledCnt)
+		t.Errorf(
+			"all jobs should be cancel due to their context was cancelled before, cancelled jobs: got=%d",
+			cancelledCnt)
 	}
 }
 
@@ -321,7 +363,9 @@ func TestLimiterAccumulatingPermits(t *testing.T) {
 	cancel()
 
 	if processedCnt < 49 {
-		t.Errorf("with limiter set to process ~50 jobs per 1s and 101 jobs scheduled after one second I would expect to have processed ~50 of them immediately: got=%d", processedCnt)
+		t.Errorf(
+			"with limiter set to process ~50 jobs per 1s and 101 jobs scheduled after one second I would expect to have processed ~50 of them immediately: got=%d",
+			processedCnt)
 	}
 
 	want := 50 + 1
@@ -356,13 +400,19 @@ func TestLimiterPermitsDoesNotAccumulateOverTime(t *testing.T) {
 	cancel()
 
 	if processedCnt < 49 {
-		t.Errorf("with limiter set to process ~50 jobs per 0.5s and 201 jobs scheduled after one second I would expect to have processed at ~50 of them: got=%d", processedCnt)
+		t.Errorf(
+			"with limiter set to process ~50 jobs per 0.5s and 201 jobs scheduled after one second I would expect to have processed at ~50 of them: got=%d",
+			processedCnt)
 		// because permits older than 'time unit' should expire
 	}
 
 	want := 50 + 1
 	if processedCnt < want {
-		t.Errorf("permits older than %s should expire. expect to process no more than %d jobs in given time, got=%d", timeUnit, want, processedCnt)
+		t.Errorf(
+			"permits older than %s should expire. expect to process no more than %d jobs in given time, got=%d",
+			timeUnit,
+			want,
+			processedCnt)
 	}
 }
 
@@ -464,11 +514,15 @@ func TestLimiterWaitABunchCtxCanceled(t *testing.T) {
 	cancel()
 
 	if processedCnt != 0 {
-		t.Errorf("all jobs should be cancel due to their context was cancelled before, processed jobs: got=%d", processedCnt)
+		t.Errorf(
+			"all jobs should be cancel due to their context was cancelled before, processed jobs: got=%d",
+			processedCnt)
 	}
 
 	if cancelledCnt != 10 {
-		t.Errorf("all jobs should be cancel due to their context was cancelled before, cancelled jobs: got=%d", cancelledCnt)
+		t.Errorf(
+			"all jobs should be cancel due to their context was cancelled before, cancelled jobs: got=%d",
+			cancelledCnt)
 	}
 }
 
@@ -497,16 +551,28 @@ func TestLimiterWaitABunchPermitsDoesNotAccumulateOverLimit(t *testing.T) {
 	cancel()
 
 	if processedCnt < 5 {
-		t.Errorf("with limiter set to process ~50 jobs per 0.5s, after one second I would expect to have processed at ~50 of them: got=%d", processedCnt)
+		t.Errorf(
+			"with limiter set to process ~50 jobs per 0.5s, after one second I would expect to have processed at ~50 of them: got=%d",
+			processedCnt)
 	}
 
 	want := 5 + 1
 	if processedCnt < want {
-		t.Errorf("should not over-accumulate permits and process no more than %d jobs in given time, got=%d", want, processedCnt)
+		t.Errorf(
+			"should not over-accumulate permits and process no more than %d jobs in given time, got=%d",
+			want,
+			processedCnt)
 	}
 }
 
-func scheduleJobsBundle(ctx context.Context, done chan struct{}, limiter *Limiter, mu *sync.Mutex, bundleIdx, jobsToSchedule int, totalStartedCnt, processedCnt, canceledJobsCnt *int) {
+func scheduleJobsBundle(
+	ctx context.Context,
+	done chan struct{},
+	limiter *Limiter,
+	mu *sync.Mutex,
+	bundleIdx, jobsToSchedule int,
+	totalStartedCnt, processedCnt, canceledJobsCnt *int,
+) {
 	// outer:
 	for i := range jobsToSchedule {
 		// select {
@@ -557,7 +623,15 @@ func mbStartJob(
 	}()
 }
 
-func scheduleManyTaskJobsBundle(ctx context.Context, done chan struct{}, limiter *Limiter, mu *sync.Mutex, bundleIdx, neededPermits int, jobsToSchedule int, totalStartedCnt, processedCnt, canceledJobsCnt *int) {
+func scheduleManyTaskJobsBundle(
+	ctx context.Context,
+	done chan struct{},
+	limiter *Limiter,
+	mu *sync.Mutex,
+	bundleIdx, neededPermits int,
+	jobsToSchedule int,
+	totalStartedCnt, processedCnt, canceledJobsCnt *int,
+) {
 	// outer:
 	for i := range jobsToSchedule {
 		// select {
