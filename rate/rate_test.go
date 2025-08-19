@@ -787,7 +787,7 @@ func TestReserveABunchRestore(t *testing.T) {
 		assertSuccessfulRestore(t, lim, err, initialLastAt, currPermits, wantAvailablePermits)
 	})
 
-	t.Run("when some time passed corresponding part of permits should be restored", func(t *testing.T) {
+	t.Run("when some time passed only corresponding part of permits should be restored", func(t *testing.T) {
 		t.Parallel()
 
 		lim := NewLimiter(limit, timeUnit)
@@ -811,6 +811,30 @@ func TestReserveABunchRestore(t *testing.T) {
 
 		err := r.Restore()
 		assertSuccessfulRestore(t, lim, err, initialLastAt, currPermits, wantAvailablePermits)
+	})
+
+	t.Run("when reservation time passed nothing should be restored", func(t *testing.T) {
+		t.Parallel()
+
+		lim := NewLimiter(limit, timeUnit)
+
+		ctx := t.Context()
+
+		now := time.Now()
+		expectedDue := now.Add(200 * time.Millisecond)
+		var n int64 = 10
+
+		r := lim.Reserve(ctx, n)
+
+		assertSuccessfulReservation(t, lim, ctx, r, n, expectedDue, now)
+
+		time.Sleep(200 * time.Millisecond)
+
+		wantAvailablePermits := int64(lim.permits)
+		currPermits := int64(lim.permits) // TODO: start here
+
+		err := r.Restore()
+		assertSuccessfulRestore(t, lim, err, time.Time{}, currPermits, wantAvailablePermits)
 	})
 
 	t.Run("restore should not exceed the permits limit", func(t *testing.T) {
