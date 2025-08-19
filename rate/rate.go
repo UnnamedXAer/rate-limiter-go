@@ -17,17 +17,19 @@ const DefaultPermits PermitsLimit = 1000
 const Unlimited PermitsLimit = math.MaxFloat64
 
 type Limiter struct {
-	permits                        float64
+	limit                          float64
 	timeUnit                       time.Duration
 	timeToCreatePermit             time.Duration
 	timeUnitFractionToCreatePermit float64
-	oldPermits                     float64
+	permits                        float64
 	lastAt                         time.Time
 	lock                           chan struct{}
 	log                            *log.Logger
 }
 
-func NewLimiter(permitsPerMinute PermitsLimit, timeUnit ...time.Duration) *Limiter {
+// NewLimiter returns new limiter with a `limit` of permits in `timeUnit`;
+// Default `timeUnit` is one minute;
+func NewLimiter(limit PermitsLimit, timeUnit ...time.Duration) *Limiter {
 
 	limiterTimeUnit := DefaultTimeUnit
 	if len(timeUnit) > 0 {
@@ -37,11 +39,11 @@ func NewLimiter(permitsPerMinute PermitsLimit, timeUnit ...time.Duration) *Limit
 	lock := make(chan struct{}, 1)
 
 	l := &Limiter{
-		permits:                        float64(permitsPerMinute),
+		limit:                          float64(limit),
 		timeUnit:                       limiterTimeUnit,
-		timeToCreatePermit:             calcTimeForSinglePermit(float64(permitsPerMinute), limiterTimeUnit),
-		timeUnitFractionToCreatePermit: calcTimeUnitFractionForSinglePermit(float64(permitsPerMinute), limiterTimeUnit),
-		oldPermits:                     float64(0),
+		timeToCreatePermit:             calcTimeForSinglePermit(float64(limit), limiterTimeUnit),
+		timeUnitFractionToCreatePermit: calcTimeUnitFractionForSinglePermit(float64(limit), limiterTimeUnit),
+		permits:                        float64(0),
 		lastAt:                         time.Now(),
 		lock:                           lock,
 		log:                            log.New(os.Stdout, "L > ", log.Lmicroseconds),
@@ -73,12 +75,12 @@ func (l *Limiter) WaitMany(ctx context.Context, n int64) error {
 
 	bIdx, i := getBIdxAndIdx(ctx)
 
-	if l.permits == float64(Unlimited) {
+	if l.limit == float64(Unlimited) {
 		return nil
 	}
 
-	if n > int64(l.permits) {
-		return fmt.Errorf("[%2d][%2d] requested amount (%d) exceeds current limit (%d)", bIdx, i, n, int64(l.permits))
+	if n > int64(l.limit) {
+		return fmt.Errorf("[%2d][%2d] requested amount (%d) exceeds current limit (%d)", bIdx, i, n, int64(l.limit))
 	}
 
 	l.lock <- struct{}{}
@@ -89,7 +91,7 @@ func (l *Limiter) WaitMany(ctx context.Context, n int64) error {
 	if int64(availableNow) >= n {
 		l.log.Printf("[%2d][%2d] permits are available right away", bIdx, i)
 		l.lastAt = time.Now()
-		l.oldPermits = availableNow - float64(n)
+		l.permits = availableNow - float64(n)
 		return nil
 	}
 
@@ -113,7 +115,7 @@ func (l *Limiter) WaitMany(ctx context.Context, n int64) error {
 		// after that we have full permit, but we instantly use that so the available permits
 		// is zero after this operation;
 		// in case of multiple permits, the logic stays the same;
-		l.oldPermits = 0
+		l.permits = 0
 		l.log.Printf("[%2d][%2d] %.3f permits awaited (%s)", bIdx, i, missingPermits, timeToCatchUp)
 		return nil
 	}
@@ -124,7 +126,7 @@ func (l *Limiter) calcTimetoCatchUp(needPermits float64) time.Duration {
 }
 
 func (l *Limiter) AllowNow(n int64) bool {
-	if n > int64(l.permits) {
+	if n > int64(l.limit) {
 		return false
 	}
 
@@ -156,7 +158,7 @@ func (l *Limiter) available(at time.Time) float64 {
 	// TODO: do we correctly handle case when `at - now > timeUnit`
 
 	possiblePermits := l.catchUp(at)
-	return possiblePermits + l.oldPermits
+	return possiblePermits + l.permits
 }
 
 // catchUp calculates number of permits that would be produced since the last time the permit was acquired until now;
@@ -168,12 +170,88 @@ func (l *Limiter) catchUp(due time.Time) float64 {
 	passedTime := due.Sub(lastAcquiredAt)
 
 	if passedTime >= l.timeUnit {
-		return l.permits
+		return l.limit
 	}
 
 	wouldProducePermits := float64(passedTime) / l.timeUnitFractionToCreatePermit
 
 	return wouldProducePermits
+}
+
+func (l *Limiter) Reserve(ctx context.Context, n int64) Reservation {
+
+	now := time.Now()
+
+	bIdx, i := getBIdxAndIdx(ctx)
+
+	d := l.calcTimetoCatchUp(float64(n))
+	due := now.Add(d)
+	if deadline, ok := ctx.Deadline(); ok {
+		if due.After(deadline) {
+			r := Reservation{
+				lim:         l,
+				Ok:          false,
+				Due:         due,
+				Permits:     n,
+				requestedAt: now,
+			}
+
+			l.log.Printf("[%2d][%2d] %s", bIdx, i, r)
+			return r
+		}
+	}
+
+	l.lastAt = due
+	l.permits = 0
+
+	r := Reservation{
+		lim:         l,
+		Ok:          true,
+		Due:         due,
+		Permits:     n,
+		requestedAt: now,
+	}
+
+	l.log.Printf("[%2d][%2d] %s", bIdx, i, r)
+
+	return r
+}
+
+type Reservation struct {
+	lim         *Limiter
+	Ok          bool
+	Permits     int64
+	Due         time.Time
+	requestedAt time.Time
+}
+
+func (r Reservation) String() string {
+	if r.Ok {
+		return fmt.Sprintf("Successfull Reservation of %d permits, Due: %s, Requested: %s", r.Permits, r.Due, r.requestedAt)
+	}
+
+	return fmt.Sprintf("Failed Reservation of %d permits, Rrequested: %s", r.Permits, r.requestedAt)
+}
+
+func (r Reservation) Restore() error {
+
+	if !r.Ok {
+		return fmt.Errorf("reservation no Ok")
+	}
+
+	if r.Due.Before(time.Now()) {
+		return fmt.Errorf("reservation already expired")
+	}
+
+	// TODO:...
+	r.lim.permits += float64(r.Permits)
+	last := r.Due
+	if last.After(r.lim.lastAt) {
+		r.lim.lastAt = last
+	}
+
+	return nil
+
 }
 
 func calcTimeForSinglePermit(permitsInTimeUnit float64, timeUnit time.Duration) time.Duration {

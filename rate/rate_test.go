@@ -682,3 +682,254 @@ func mbStartMultiTaskJob(
 		}
 	}()
 }
+
+///// bunch
+
+func TestReserveABunch(t *testing.T) {
+	t.Parallel()
+
+	var limit PermitsLimit = 50
+	var timeUnit time.Duration = time.Second
+
+	lim := NewLimiter(limit, timeUnit)
+
+	var n int64 = 10 // -> ~200ms
+	ctx := t.Context()
+
+	r := lim.Reserve(ctx, n)
+
+	now := time.Now()
+	expectedDue := now.Add(200 * time.Millisecond)
+
+	assertSuccessfulReservation(t, lim, ctx, r, n, expectedDue, now)
+}
+
+func TestReserveABunchWithDeadline(t *testing.T) {
+	t.Parallel()
+
+	var limit PermitsLimit = 50
+	var timeUnit time.Duration = time.Second
+
+	lim := NewLimiter(limit, timeUnit)
+
+	var n int64 = 10 // -> ~200ms
+	ctx, stop := context.WithDeadline(t.Context(), time.Now().Add(220*time.Millisecond))
+	defer stop()
+
+	r := lim.Reserve(ctx, n)
+	now := time.Now()
+	expectedDue := now.Add(200 * time.Millisecond)
+
+	assertSuccessfulReservation(t, lim, ctx, r, n, expectedDue, now)
+}
+
+func TestReserveABunchWithUnrealisticDeadline(t *testing.T) {
+	t.Parallel()
+
+	var limit PermitsLimit = 50
+	var timeUnit time.Duration = time.Second
+
+	lim := NewLimiter(limit, timeUnit)
+
+	var n int64 = 10 // -> ~200ms
+	ctx, stop := context.WithDeadline(t.Context(), time.Now().Add(180*time.Millisecond))
+	defer stop()
+
+	r := lim.Reserve(ctx, n)
+	assertFailedReservation(t, r)
+}
+
+func TestReserveABunchOverUnitPermitsLimit(t *testing.T) {
+	t.Parallel()
+
+	var limit PermitsLimit = 50
+	var timeUnit time.Duration = time.Second
+
+	lim := NewLimiter(limit, timeUnit)
+
+	var n int64 = 50 + 10 // -> ~1200ms
+	ctx, stop := context.WithDeadline(t.Context(), time.Now().Add(1280*time.Millisecond))
+	defer stop()
+
+	r := lim.Reserve(ctx, n)
+	now := time.Now()
+	expectedDue := now.Add(1200 * time.Millisecond)
+	assertSuccessfulReservation(t, lim, ctx, r, n, expectedDue, now)
+}
+
+func TestReserveABunchRestore(t *testing.T) {
+	t.Parallel()
+
+	var limit PermitsLimit = 50
+	var timeUnit time.Duration = time.Second
+
+	t.Run("when no time passed nothing should be restored", func(t *testing.T) {
+		t.Parallel()
+
+		lim := NewLimiter(limit, timeUnit)
+
+		initialPermits := lim.permits
+		initialLastAt := lim.lastAt
+		ctx := t.Context()
+
+		now := time.Now()
+		expectedDue := now.Add(200 * time.Millisecond)
+		var n int64 = 10
+
+		r := lim.Reserve(ctx, n)
+
+		assertSuccessfulReservation(t, lim, ctx, r, n, expectedDue, now)
+
+		wantAvailablePermits := int64(initialPermits)
+		currPermits := int64(lim.permits)
+
+		err := r.Restore()
+		assertSuccessfulRestore(t, lim, err, initialLastAt, currPermits, wantAvailablePermits)
+	})
+
+	t.Run("when some time passed corresponding part of permits should be restored", func(t *testing.T) {
+		t.Parallel()
+
+		lim := NewLimiter(limit, timeUnit)
+
+		initialPermits := lim.permits
+		initialLastAt := lim.lastAt
+		ctx := t.Context()
+
+		now := time.Now()
+		expectedDue := now.Add(200 * time.Millisecond)
+		var n int64 = 10
+
+		r := lim.Reserve(ctx, n)
+
+		assertSuccessfulReservation(t, lim, ctx, r, n, expectedDue, now)
+
+		time.Sleep(100 * time.Millisecond)
+
+		wantAvailablePermits := int64(initialPermits) + 5
+		currPermits := int64(lim.permits)
+
+		err := r.Restore()
+		assertSuccessfulRestore(t, lim, err, initialLastAt, currPermits, wantAvailablePermits)
+	})
+
+	t.Run("restore should not exceed the permits limit", func(t *testing.T) {
+		t.Parallel()
+
+		lim := NewLimiter(limit, timeUnit)
+
+		initialLastAt := lim.lastAt
+		ctx := t.Context()
+
+		now := time.Now()
+		expectedDue := now.Add(1200 * time.Millisecond)
+		var n int64 = 60
+
+		r := lim.Reserve(ctx, n)
+
+		assertSuccessfulReservation(t, lim, ctx, r, n, expectedDue, now)
+
+		time.Sleep(1100 * time.Millisecond)
+
+		wantAvailablePermits := int64(limit)
+		currPermits := int64(lim.permits)
+
+		err := r.Restore()
+		assertSuccessfulRestore(t, lim, err, initialLastAt, currPermits, wantAvailablePermits)
+	})
+
+	t.Run("restoring of failed reservation should not be possible", func(t *testing.T) {
+		t.Parallel()
+
+		lim := NewLimiter(limit, timeUnit)
+
+		ctx := t.Context()
+
+		var n int64 = 60
+
+		r := lim.Reserve(ctx, n)
+		assertFailedReservation(t, r)
+
+		err := r.Restore()
+		assertFailedRestore(t, err)
+	})
+}
+
+func assertFailedRestore(t *testing.T, err error) {
+	t.Helper()
+
+	if err == nil {
+		t.Fatalf("restoring failed reservation did not return error, but should")
+	}
+}
+
+func assertSuccessfulRestore(t *testing.T, lim *Limiter, err error, prevLastAt time.Time, currPermits, wantAvailablePermits int64) {
+	t.Helper()
+
+	if err != nil {
+		t.Fatalf("restoring reserved permits failed: %s", err)
+	}
+
+	if currPermits != wantAvailablePermits {
+		t.Fatalf("wrong number of permits after restore, want=%d, got=%d", wantAvailablePermits, currPermits)
+	}
+
+	if !around(lim.lastAt, prevLastAt) {
+		t.Fatalf("wrong lastAt after restore, want=~%s, got=%s", prevLastAt, lim.lastAt)
+	}
+}
+
+func assertFailedReservation(t *testing.T, r Reservation) {
+	t.Helper()
+
+	if r.Ok {
+		t.Fatal("reservation was successful, but expected failed")
+	}
+}
+
+func assertSuccessfulReservation(
+	t *testing.T,
+	lim *Limiter,
+	ctx context.Context,
+	r Reservation,
+	expectedPermits int64,
+	expectedDue time.Time,
+	now time.Time,
+) {
+	t.Helper()
+
+	if !r.Ok {
+		t.Fatalf("reservation failed, but expected successful")
+	}
+
+	if r.Permits != expectedPermits {
+		t.Fatalf("wrong number of reserved permits. want=%d, got=%d", expectedPermits, r.Permits)
+	}
+
+	if !around(r.Due, expectedDue) {
+		t.Fatalf("wrong due time, expected around %s in the future, got=%s", expectedDue.Sub(now), r.Due.Sub(now))
+	}
+
+	if lim.lastAt != r.Due {
+		t.Fatalf("lastAt should be set to due")
+	}
+
+	if deadline, ok := ctx.Deadline(); ok {
+		if deadline.Before(r.Due) {
+			t.Fatalf("due exceeds deadline")
+		}
+	}
+}
+
+func around(t time.Time, nearTo time.Time, plusMinus ...time.Duration) bool {
+	offset := 5 * time.Millisecond
+
+	if len(plusMinus) > 0 {
+		offset = plusMinus[0]
+	}
+
+	min := nearTo.Add(-offset)
+	max := nearTo.Add(offset)
+
+	return t.After(min) && t.Before(max)
+}
