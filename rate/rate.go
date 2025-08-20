@@ -18,7 +18,7 @@ const Unlimited PermitsLimit = math.MaxFloat64
 
 type Limiter struct {
 	limit                          float64
-	timeUnit                       time.Duration
+	limitDuration                  time.Duration
 	timeToCreatePermit             time.Duration
 	timeUnitFractionToCreatePermit float64
 	permits                        float64
@@ -40,7 +40,7 @@ func NewLimiter(limit PermitsLimit, timeUnit ...time.Duration) *Limiter {
 
 	l := &Limiter{
 		limit:                          float64(limit),
-		timeUnit:                       limiterTimeUnit,
+		limitDuration:                  limiterTimeUnit,
 		timeToCreatePermit:             calcTimeForSinglePermit(float64(limit), limiterTimeUnit),
 		timeUnitFractionToCreatePermit: calcTimeUnitFractionForSinglePermit(float64(limit), limiterTimeUnit),
 		permits:                        float64(0),
@@ -97,7 +97,7 @@ func (l *Limiter) WaitMany(ctx context.Context, n int64) error {
 
 	missingPermits := float64(n) - availableNow
 
-	timeToCatchUp := l.calcTimetoCatchUp(missingPermits)
+	timeToCatchUp := l.calcTimeToCatchUp(missingPermits)
 
 	wait := time.After(timeToCatchUp)
 
@@ -121,7 +121,7 @@ func (l *Limiter) WaitMany(ctx context.Context, n int64) error {
 	}
 }
 
-func (l *Limiter) calcTimetoCatchUp(needPermits float64) time.Duration {
+func (l *Limiter) calcTimeToCatchUp(needPermits float64) time.Duration {
 	return time.Duration(l.timeUnitFractionToCreatePermit * needPermits)
 }
 
@@ -131,6 +131,15 @@ func (l *Limiter) AllowNow(n int64) bool {
 	}
 
 	return l.AvailableNow() >= n
+}
+
+func (l *Limiter) correct() {
+	if l.permits > l.limit {
+		ago := time.Since(l.lastAt)
+		l.log.Printf("wrong state: permits=%.4f, lastAt=%s, %s ago", l.permits, l.lastAt, ago)
+		l.permits = l.limit
+		l.lastAt = time.Now().Add(-l.limitDuration)
+	}
 }
 
 func (l *Limiter) Allow(n int64, at time.Time) bool {
@@ -167,13 +176,17 @@ func (l *Limiter) available(at time.Time) float64 {
 func (l *Limiter) catchUp(due time.Time) float64 {
 
 	lastAcquiredAt := l.lastAt
-	passedTime := due.Sub(lastAcquiredAt)
+	d := due.Sub(lastAcquiredAt)
 
-	if passedTime >= l.timeUnit {
-		return l.limit
+	if d < 0 {
+		d = -d
 	}
 
-	wouldProducePermits := float64(passedTime) / l.timeUnitFractionToCreatePermit
+	// if passedTime >= l.timeUnit {
+	// 	return l.limit
+	// }
+
+	wouldProducePermits := float64(d) / l.timeUnitFractionToCreatePermit
 
 	return wouldProducePermits
 }
@@ -184,7 +197,7 @@ func (l *Limiter) Reserve(ctx context.Context, n int64) Reservation {
 
 	bIdx, i := getBIdxAndIdx(ctx)
 
-	d := l.calcTimetoCatchUp(float64(n))
+	d := l.calcTimeToCatchUp(float64(n))
 	due := now.Add(d)
 	if deadline, ok := ctx.Deadline(); ok {
 		if due.After(deadline) {
@@ -227,31 +240,59 @@ type Reservation struct {
 
 func (r Reservation) String() string {
 	if r.Ok {
-		return fmt.Sprintf("Successfull Reservation of %d permits, Due: %s, Requested: %s", r.Permits, r.Due, r.requestedAt)
+		return fmt.Sprintf("Successful Reservation of %d permits, Due: %s, Requested: %s", r.Permits, r.Due, r.requestedAt)
 	}
 
-	return fmt.Sprintf("Failed Reservation of %d permits, Rrequested: %s", r.Permits, r.requestedAt)
+	return fmt.Sprintf("Failed Reservation of %d permits, Requested: %s", r.Permits, r.requestedAt)
 }
 
-func (r Reservation) Restore() error {
+func (r Reservation) Restore() {
 
 	if !r.Ok {
-		return fmt.Errorf("reservation no Ok")
+		return
 	}
 
-	if r.Due.Before(time.Now()) {
-		return fmt.Errorf("reservation already expired")
+	now := time.Now()
+
+	minTime := now.Add(-r.lim.limitDuration)
+	if r.Due.Before(minTime) {
+		r.lim.log.Printf("R Expired: due=%s, minTime=%s", r.Due, minTime)
+		// already expired
+		return
 	}
 
-	// TODO:...
-	r.lim.permits += float64(r.Permits)
-	last := r.Due
+	startTime := maxT(minTime, r.requestedAt)
+	endTime := r.Due
+
+	restorableDuration := endTime.Sub(startTime)
+
+	if restorableDuration > r.lim.limitDuration {
+		restorableDuration = r.lim.limitDuration
+	}
+
+	restorablePermits := float64(restorableDuration) / (r.lim.timeUnitFractionToCreatePermit)
+
+	// if restorablePermits > r.lim.limit {
+	// 	restorablePermits = r.lim.limit
+	// }
+
+	r.lim.log.Printf("R restorable duration=%s => %.4f of permits", restorableDuration, restorablePermits)
+	fmt.Print()
+
+	r.lim.permits = min(r.lim.permits+restorablePermits, r.lim.limit)
+
+	last := endTime
 	if last.After(r.lim.lastAt) {
 		r.lim.lastAt = last
 	}
 
-	return nil
+	r.lim.correct()
 
+	// TODO: remove assert
+	if r.lim.permits > r.lim.limit {
+		r.lim.log.Fatalf("permits exceeds limit. limit=%.0f, permits=%.4f", r.lim.limit, r.lim.permits)
+	}
+	// assert:end
 }
 
 func calcTimeForSinglePermit(permitsInTimeUnit float64, timeUnit time.Duration) time.Duration {
@@ -260,4 +301,34 @@ func calcTimeForSinglePermit(permitsInTimeUnit float64, timeUnit time.Duration) 
 
 func calcTimeUnitFractionForSinglePermit(permitsInTimeUnit float64, timeUnit time.Duration) float64 {
 	return float64(timeUnit) / permitsInTimeUnit
+}
+
+func minT(t1, t2 time.Time, tx ...time.Time) time.Time {
+	min := t1
+	if t2.Before(min) {
+		min = t2
+	}
+
+	for _, t := range tx {
+		if t.Before(min) {
+			min = t
+		}
+	}
+
+	return min
+}
+
+func maxT(t1, t2 time.Time, tx ...time.Time) time.Time {
+	max := t1
+	if t2.After(max) {
+		max = t2
+	}
+
+	for _, t := range tx {
+		if t.After(max) {
+			max = t
+		}
+	}
+
+	return max
 }
