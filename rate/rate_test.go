@@ -650,8 +650,8 @@ func mbStartJob(
 		*totalJobsScheduled++
 		mu.Unlock()
 
-		ctx = context.WithValue(ctx, 'b', bundleIdx)
-		ctx = context.WithValue(ctx, 'i', idx)
+		ctx = context.WithValue(ctx, ctxKey('b'), bundleIdx)
+		ctx = context.WithValue(ctx, ctxKey('i'), idx)
 
 		err := limiter.Wait(ctx)
 		if err != nil {
@@ -710,8 +710,8 @@ func mbStartMultiTaskJob(
 		*totalJobsScheduled++
 		mu.Unlock()
 
-		ctx = context.WithValue(ctx, 'b', bundleIdx)
-		ctx = context.WithValue(ctx, 'i', idx)
+		ctx = context.WithValue(ctx, ctxKey('b'), bundleIdx)
+		ctx = context.WithValue(ctx, ctxKey('i'), idx)
 
 		err := limiter.WaitMany(ctx, int64(neededPermits))
 		if err != nil {
@@ -805,16 +805,14 @@ func TestReserveABunchOverUnitPermitsLimit(t *testing.T) {
 	defer stop()
 
 	r := lim.Reserve(ctx, n)
-	now := time.Now()
-	expectedDue := now.Add(1200 * time.Millisecond)
-	assertSuccessfulReservation(t, lim, ctx, r, n, expectedDue, now)
+	assertFailedReservation(t, r)
 }
 
 func TestReserveABunchRestore(t *testing.T) {
 	t.Parallel()
 
-	var limit PermitsLimit = 10
-	var timeUnit time.Duration = time.Second
+	const limit PermitsLimit = 10                          // (10 permits) 100ms
+	const timeUnit time.Duration = 1000 * time.Millisecond // (1 Second) 10 permits
 
 	t.Run("restore full reservation into future", func(t *testing.T) {
 		t.Parallel()
@@ -927,18 +925,15 @@ func TestReserveABunchRestore(t *testing.T) {
 	})
 
 	t.Run("restore can be applied only once", func(t *testing.T) {
-		t.Skip()
 		t.Parallel()
 
 		lim := NewLimiter(limit, timeUnit)
-
-		initialPermits := lim.permits
 
 		ctx := t.Context()
 
 		now := time.Now()
 		expectedDue := now.Add(200 * time.Millisecond)
-		var n int64 = 10
+		var n int64 = 2
 
 		r := lim.Reserve(ctx, n)
 
@@ -946,7 +941,7 @@ func TestReserveABunchRestore(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		wantAvailablePermits := initialPermits + 5
+		wantAvailablePermits := 0.0
 		wantLastAt := time.Now()
 
 		assertSuccessfulRestore(t, lim, r, wantLastAt, wantAvailablePermits)
@@ -1023,8 +1018,8 @@ func assertSuccessfulReservation(
 		t.Fatalf("wrong due time, expected around %s in the future, got=%s, diff=%s", expectedDue.Sub(now), r.Due.Sub(now), diff)
 	}
 
-	if lim.lastAt != r.Due {
-		t.Fatalf("lastAt should be set to due")
+	if !aroundTime(lim.lastAt, now) {
+		t.Fatalf("lastAt should be set to now")
 	}
 
 	if deadline, ok := ctx.Deadline(); ok {
