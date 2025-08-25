@@ -85,14 +85,19 @@ func (l *Limiter) WaitMany(ctx context.Context, n int64) error {
 		return fmt.Errorf("[%2d][%2d] requested amount (%d) exceeds current limit (%d)", bIdx, i, n, int64(l.limit))
 	}
 
-	l.lock <- struct{}{}
-	defer func() { <-l.lock }()
+	select {
+	case l.lock <- struct{}{}:
+		defer func() { <-l.lock }()
+	case <-ctx.Done():
+		return fmt.Errorf("[%2d][%2d] ctx Done while waiting for the lock, %w", bIdx, i, ctx.Err())
+	}
 
-	availableNow := l.available(time.Now())
+	now := time.Now()
+	availableNow := l.available(now)
 
 	if int64(availableNow) >= n {
 		l.log.Printf("[%2d][%2d] permits are available right away", bIdx, i)
-		l.lastAt = time.Now()
+		l.lastAt = now
 		l.permits = availableNow - float64(n)
 		return nil
 	}
@@ -170,10 +175,10 @@ func (l *Limiter) available(at time.Time) float64 {
 // catchUp calculates number of permits that would be produced since the last time the permit was acquired until now;
 //
 // catchUp does not update the Limiter;
-func (l *Limiter) catchUp(due time.Time) float64 {
+func (l *Limiter) catchUp(now time.Time) float64 {
 
 	lastAcquiredAt := l.lastAt
-	d := due.Sub(lastAcquiredAt)
+	d := now.Sub(lastAcquiredAt)
 
 	if d < 0 {
 		d = -d
@@ -232,20 +237,18 @@ func (l *Limiter) Reserve(ctx context.Context, n int64) Reservation {
 
 	l.permits -= float64(n)
 
-	if deadline, ok := ctx.Deadline(); ok {
-		if due.After(deadline) {
-			r := Reservation{
-				lim:         l,
-				Ok:          false,
-				Due:         due,
-				Permits:     n,
-				requestedAt: now,
-				canceled:    new(bool),
-			}
-
-			l.log.Printf("[%2d][%2d] %s", bIdx, i, r)
-			return r
+	if deadline, ok := ctx.Deadline(); ok && due.After(deadline) {
+		r := Reservation{
+			lim:         l,
+			Ok:          false,
+			Due:         due,
+			Permits:     n,
+			requestedAt: now,
+			canceled:    new(bool),
 		}
+
+		l.log.Printf("[%2d][%2d] %s", bIdx, i, r)
+		return r
 	}
 
 	r := Reservation{
@@ -268,7 +271,7 @@ type Reservation struct {
 	Permits     int64
 	Due         time.Time
 	requestedAt time.Time
-	canceled    *bool
+	canceled    *bool // instead of canceled set Ok to false
 }
 
 func (r Reservation) String() string {
@@ -292,6 +295,12 @@ func (r Reservation) Restore() {
 
 	now := time.Now()
 
+	if now.After(r.lim.lastAt) {
+		catchUpPermits := r.lim.catchUp(now)
+		r.lim.permits += catchUpPermits
+		r.lim.lastAt = now
+	}
+
 	minTime := now.Add(-r.lim.limitDuration)
 
 	if r.Due.Before(minTime) {
@@ -301,6 +310,7 @@ func (r Reservation) Restore() {
 	}
 
 	startTime := maxT(minTime, r.requestedAt)
+	// endTime := minT(r.Due, now) // restore only until now
 	endTime := r.Due
 
 	restorableDuration := min(endTime.Sub(startTime), r.lim.limitDuration)
@@ -313,12 +323,11 @@ func (r Reservation) Restore() {
 
 	if r.lim.permits > r.lim.limit {
 		r.lim.permits = r.lim.limit
-		// r.lim.lastAt = now
-		// } else {
+		if now.After(r.lim.lastAt) {
+			r.lim.lastAt = now
+		}
 
-		// 	if endTime.After(r.lim.lastAt) {
-		// 		r.lim.lastAt = endTime
-		// 	}
+		return
 	}
 
 	if now.After(r.lim.lastAt) {
