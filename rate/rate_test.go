@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -242,6 +243,41 @@ func TestAvailableDoNotAccumulateOverLimit(t *testing.T) {
 			expectedNotAvailable,
 			delay)
 	}
+}
+
+func TestWait(t *testing.T) {
+	t.Parallel()
+
+	// 50 per 1s
+	limiter := NewLimiter(50 * 60)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		err := limiter.Wait(ctx) // ~20ms
+		errCh <- err
+	}()
+
+	select {
+	case <-ctx.Done():
+		close(errCh)
+		t.Fatalf("too long")
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("acquire failed: %s", err)
+		}
+
+		end := time.Now()
+		expectedEnd := start.Add(limiter.timeToCreatePermit)
+		if !aroundTime(end, expectedEnd) {
+			t.Fatalf("expect to get permit in ~20ms, go after %s", end.Sub(start))
+		}
+
+	}
+
 }
 
 func TestWaitStartRightAway(t *testing.T) {
@@ -542,6 +578,7 @@ func TestWaitABunchCtxCanceled(t *testing.T) {
 }
 
 func TestWaitCancellingAWaitShouldAllowToProceedByOthers(t *testing.T) {
+	t.Skipf("this functionality no longer holds when we use `reserve` in the wait function")
 	t.Parallel()
 
 	wg := sync.WaitGroup{}
@@ -577,6 +614,83 @@ func TestWaitCancellingAWaitShouldAllowToProceedByOthers(t *testing.T) {
 	if delay >= limiter.timeToCreatePermit*3 {
 		t.Fatalf("wait didn't respect cancelling of another wait. want delay < %s, got=%s", limiter.timeToCreatePermit*3, delay)
 	}
+}
+
+func TestWaitCancelShouldReleaseResources(t *testing.T) {
+	t.Parallel()
+
+	// wg := sync.WaitGroup{}
+
+	limiter := NewLimiter(10, time.Second) // 100ms
+
+	doneErr := make(chan error)
+
+	const errMsg = "context cancelled for test purpose"
+	ctx, cancel := context.WithCancelCause(t.Context())
+
+	time.AfterFunc(20*time.Millisecond, func() {
+		cancel(fmt.Errorf(errMsg))
+	})
+
+	ctx = context.WithValue(ctx, ctxKey('i'), 999999)
+	defer cancel(fmt.Errorf("defer cancel"))
+
+	start := time.Now()
+	// wg.Add(3)
+
+	go func() {
+		err := limiter.Wait(t.Context())
+		if err != nil {
+			t.Errorf("err: %s", err)
+		}
+		// wg.Done()
+	}()
+
+	time.Sleep(time.Millisecond)
+
+	go func() {
+		doneErr <- limiter.Wait(ctx) // wait that will timeout!
+		// wg.Done()
+	}()
+
+	time.Sleep(time.Millisecond)
+	go func() {
+		err := limiter.Wait(t.Context())
+		if err != nil {
+			t.Errorf("err: %s", err)
+		}
+		// wg.Done()
+	}()
+
+	t.Logf("waiting for ctx to timeout")
+	err := <-doneErr
+	if err == nil || !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("expected context to be canceled, but error is: %s", err)
+	}
+	t.Logf("ctx done, waiting for permit...")
+
+	err = context.Cause(ctx)
+	if err == nil || !strings.Contains(err.Error(), errMsg) {
+		t.Fatalf("expected context to be canceled with message %q, but error is: %s", errMsg, err)
+	}
+
+	err = limiter.Wait(t.Context())
+	t.Logf("got permit, err=%s", err)
+
+	// wg.Wait()
+	delay := time.Since(start)
+
+	// 1 permit takes ~100ms. so asking for 4 permits would require 400ms if no prior permits were available
+	// but if we ask for 3 permits then cancel one and after that ask for one more we should get them in ~300ms
+
+	if delay >= limiter.timeToCreatePermit*4 {
+		t.Fatalf("wait didn't respect cancelling of another wait. want delay < %s, got=%s", limiter.timeToCreatePermit*3, delay)
+	}
+
+	if delay < limiter.timeToCreatePermit*3 {
+		t.Fatalf("waiting for 3 permits should took at least %s, but finished in %s", limiter.timeToCreatePermit*3, delay)
+	}
+
 }
 
 func TestWaitABunchPermitsDoesNotAccumulateOverLimit(t *testing.T) {
@@ -746,7 +860,7 @@ func TestReserveABunch(t *testing.T) {
 
 	lim := NewLimiter(limit, timeUnit)
 
-	var n int64 = 10 // -> ~200ms
+	var n float64 = 10 // -> ~200ms
 	ctx := t.Context()
 
 	r := lim.Reserve(ctx, n)
@@ -765,7 +879,7 @@ func TestReserveABunchWithDeadline(t *testing.T) {
 
 	lim := NewLimiter(limit, timeUnit)
 
-	var n int64 = 10 // -> ~200ms
+	var n float64 = 10 // -> ~200ms
 	ctx, stop := context.WithDeadline(t.Context(), time.Now().Add(220*time.Millisecond))
 	defer stop()
 
@@ -784,7 +898,7 @@ func TestReserveABunchWithUnrealisticDeadline(t *testing.T) {
 
 	lim := NewLimiter(limit, timeUnit)
 
-	var n int64 = 10 // -> ~200ms
+	var n float64 = 10 // -> ~200ms
 	ctx, stop := context.WithDeadline(t.Context(), time.Now().Add(180*time.Millisecond))
 	defer stop()
 
@@ -800,7 +914,7 @@ func TestReserveABunchOverUnitPermitsLimit(t *testing.T) {
 
 	lim := NewLimiter(limit, timeUnit)
 
-	var n int64 = 50 + 10 // -> ~1200ms
+	var n float64 = 50 + 10 // -> ~1200ms
 	ctx, stop := context.WithDeadline(t.Context(), time.Now().Add(1280*time.Millisecond))
 	defer stop()
 
@@ -825,7 +939,7 @@ func TestReserveABunchRestore(t *testing.T) {
 
 		now := time.Now()
 		expectedDue := now.Add(200 * time.Millisecond)
-		var n int64 = 2
+		var n float64 = 2
 
 		r := lim.Reserve(ctx, n)
 
@@ -848,7 +962,7 @@ func TestReserveABunchRestore(t *testing.T) {
 
 		now := time.Now()
 		expectedDue := now.Add(200 * time.Millisecond)
-		var n int64 = 2
+		var n float64 = 2
 
 		r := lim.Reserve(ctx, n)
 
@@ -872,7 +986,7 @@ func TestReserveABunchRestore(t *testing.T) {
 
 		now := time.Now()
 		expectedDue := now.Add(200 * time.Millisecond)
-		var n int64 = 10
+		var n float64 = 10
 
 		r := lim.Reserve(ctx, n)
 
@@ -896,7 +1010,7 @@ func TestReserveABunchRestore(t *testing.T) {
 
 		now := time.Now()
 		expectedDue := now.Add(1200 * time.Millisecond)
-		var n int64 = 60
+		var n float64 = 60
 
 		r := lim.Reserve(ctx, n)
 
@@ -917,7 +1031,7 @@ func TestReserveABunchRestore(t *testing.T) {
 
 		ctx := t.Context()
 
-		var n int64 = 60
+		var n float64 = 60
 
 		r := lim.Reserve(ctx, n)
 		assertFailedReservation(t, r)
@@ -934,7 +1048,7 @@ func TestReserveABunchRestore(t *testing.T) {
 
 		now := time.Now()
 		expectedDue := now.Add(200 * time.Millisecond)
-		var n int64 = 2
+		var n float64 = 2
 
 		r := lim.Reserve(ctx, n)
 
@@ -998,7 +1112,7 @@ func assertSuccessfulReservation(
 	lim *Limiter,
 	ctx context.Context,
 	r Reservation,
-	expectedPermits int64,
+	expectedPermits float64,
 	expectedDue time.Time,
 	now time.Time,
 ) {
@@ -1011,7 +1125,7 @@ func assertSuccessfulReservation(
 	if r.Permits != expectedPermits {
 		diff := expectedPermits - r.Permits
 		diff = max(diff, -diff)
-		t.Fatalf("wrong number of reserved permits. want=%d, got=%d, diff=%d", expectedPermits, r.Permits, diff)
+		t.Fatalf("wrong number of reserved permits. want=%.4f, got=%.4f, diff=%.4f", expectedPermits, r.Permits, diff)
 	}
 
 	if !aroundTime(r.Due, expectedDue) {

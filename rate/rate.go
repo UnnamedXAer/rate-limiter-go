@@ -86,44 +86,46 @@ func (l *Limiter) WaitMany(ctx context.Context, n int64) error {
 	}
 
 	select {
-	case l.lock <- struct{}{}:
-		defer func() { <-l.lock }()
+	// case l.lock <- struct{}{}:
+	// 	defer func() { <-l.lock }()
 	case <-ctx.Done():
 		return fmt.Errorf("[%2d][%2d] ctx Done while waiting for the lock, %w", bIdx, i, ctx.Err())
+	default:
+	}
+
+	// now := time.Now()
+	// availableNow := l.available(now)
+
+	// if int64(availableNow) >= n {
+	// 	l.log.Printf("[%2d][%2d] permits are available right away", bIdx, i)
+	// 	l.lastAt = now
+	// 	l.permits = availableNow - float64(n)
+	// 	return nil
+	// }
+
+	// missingPermits := float64(n) - availableNow
+
+	reservation := l.reserve(ctx, float64(n))
+
+	if !reservation.Ok {
+		return fmt.Errorf("[%2d][%2d] could not provide permits", bIdx, i)
 	}
 
 	now := time.Now()
-	availableNow := l.available(now)
 
-	if int64(availableNow) >= n {
-		l.log.Printf("[%2d][%2d] permits are available right away", bIdx, i)
-		l.lastAt = now
-		l.permits = availableNow - float64(n)
-		return nil
+	var wait time.Duration
+	if reservation.Due.After(now) {
+		wait = reservation.Due.Sub(now)
+		l.log.Printf("[%2d][%2d] not enough permits available, waiting for=%s", bIdx, i, wait)
 	}
-
-	missingPermits := float64(n) - availableNow
-
-	timeToCatchUp := l.permitsToDuration(missingPermits)
-
-	wait := time.After(timeToCatchUp)
-
-	l.log.Printf("[%2d][%2d] not enough permits available (we are missing ~%.3f permits), need to wait %s", bIdx, i, missingPermits, timeToCatchUp)
 
 	select {
 	case <-ctx.Done():
+		reservation.Restore()
 		return fmt.Errorf("[%2d][%2d] ctx Done while waiting for the permit, %w", bIdx, i, ctx.Err())
-	case <-wait:
-		l.lastAt = time.Now()
-		// in case on a single permit:
-		// we waited a time that corresponds to the fraction of the permit that was missing,
-		// e.g. we had 0.3 of te permit due to the different from `l.lastAt` to `now()`, so we need to wait
-		// the time for the rest of the permit, i.e. `~(0.7*timeForSinglePermit)`
-		// after that we have full permit, but we instantly use that so the available permits
-		// is zero after this operation;
-		// in case of multiple permits, the logic stays the same;
-		l.permits = 0
-		l.log.Printf("[%2d][%2d] %.3f permits awaited (%s)", bIdx, i, missingPermits, timeToCatchUp)
+	case <-time.After(wait):
+		l.log.Printf("[%2d][%2d] permits awaited (%s)", bIdx, i, wait)
+
 		return nil
 	}
 }
@@ -189,12 +191,12 @@ func (l *Limiter) catchUp(now time.Time) float64 {
 	return wouldProducePermits
 }
 
-func (l *Limiter) Reserve(ctx context.Context, n int64) Reservation {
+func (l *Limiter) Reserve(ctx context.Context, n float64) Reservation {
 
 	now := time.Now()
 
 	if l.limit == float64(Unlimited) {
-		return Reservation{
+		r := Reservation{
 			Ok:          true,
 			lim:         l,
 			Permits:     n,
@@ -202,10 +204,11 @@ func (l *Limiter) Reserve(ctx context.Context, n int64) Reservation {
 			requestedAt: now,
 			canceled:    new(bool),
 		}
+		return r
 	}
 
-	if n > int64(l.limit) {
-		return Reservation{
+	if n > l.limit {
+		r := Reservation{
 			Ok:          false,
 			lim:         l,
 			Permits:     n,
@@ -213,20 +216,26 @@ func (l *Limiter) Reserve(ctx context.Context, n int64) Reservation {
 			requestedAt: now,
 			canceled:    new(bool),
 		}
+
+		return r
 	}
 
+	return l.reserve(ctx, n)
+}
+
+func (l *Limiter) reserve(ctx context.Context, n float64) Reservation {
 	l.lock <- struct{}{}
 	defer func() { <-l.lock }()
 
 	bIdx, i := getBIdxAndIdx(ctx)
 
-	now = time.Now()
+	now := time.Now()
 
 	permits := l.catchUp(now)
 	l.permits = min(l.permits+permits, l.limit)
 	l.lastAt = now
 
-	missingPermits := float64(n) - l.permits
+	missingPermits := n - l.permits
 
 	var d time.Duration
 	var due = now
@@ -235,7 +244,7 @@ func (l *Limiter) Reserve(ctx context.Context, n int64) Reservation {
 		due = l.lastAt.Add(d)
 	}
 
-	l.permits -= float64(n)
+	l.permits -= n
 
 	if deadline, ok := ctx.Deadline(); ok && due.After(deadline) {
 		r := Reservation{
@@ -268,7 +277,7 @@ func (l *Limiter) Reserve(ctx context.Context, n int64) Reservation {
 type Reservation struct {
 	lim         *Limiter
 	Ok          bool
-	Permits     int64
+	Permits     float64
 	Due         time.Time
 	requestedAt time.Time
 	canceled    *bool // instead of canceled set Ok to false
@@ -276,10 +285,10 @@ type Reservation struct {
 
 func (r Reservation) String() string {
 	if r.Ok {
-		return fmt.Sprintf("Successful Reservation of %d permits, Due: %s, Requested: %s", r.Permits, r.Due, r.requestedAt)
+		return fmt.Sprintf("Successful Reservation of %.4f permits, Due: %s, Requested: %s", r.Permits, r.Due, r.requestedAt)
 	}
 
-	return fmt.Sprintf("Failed Reservation of %d permits, Requested: %s", r.Permits, r.requestedAt)
+	return fmt.Sprintf("Failed Reservation of %.4f permits, Requested: %s", r.Permits, r.requestedAt)
 }
 
 func (r Reservation) Restore() {
